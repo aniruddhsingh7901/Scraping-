@@ -1,0 +1,93 @@
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Archive files
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Model files
+*.pt
+*.bin
+*.pkl
+*.pickle
+*.h5
+*.model
+
+# Log files
+*.log
+logs/
+*.log.*
+
+# Python virtual environments
+venv/
+env/
+ENV/
+.venv/
+envActive
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Common Python/CI cache and build artifacts
+.pytest_cache/
+.mypy_cache/
+.cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+.tox/
+.coverage
+htmlcov/
+.hypothesis/
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tracking and temporary data files
+*_tracking.json
+worker_tracking.json
+stream_all_tracking.json
+all_subs_tracking.json
+
+# Data and output files
+big.txt
+migration_output.txt
+proxy.txt
+
+# Storage directories
+storage/
+data/
+temp/
+tmp/
+
+# Configuration files with sensitive data
+ecosystem.config.js
+scraping_config.json
+
+# JSON files (tracking, config, etc.)
+*.json
+
+# Data universe folder
+data-universe/
