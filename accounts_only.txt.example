@@ -1,0 +1,21 @@
+# Twitter Accounts File (WITHOUT proxies)
+# Format: username:password:email:email_password:ct0_token:auth_token
+# This file contains ONLY account credentials
+# Proxies will be assigned separately from proxies.txt
+
+# Get cookies from browser: Developer Tools > Application > Cookies > x.com
+# Copy ct0 and auth_token values
+
+user1:password123:user1@gmail.com:emailpass123:ct0_abc123xyz789:auth_def456uvw012
+user2:password456:user2@yahoo.com:emailpass456:ct0_ghi789rst345:auth_jkl012mno678
+user3:password789:user3@outlook.com:emailpass789:ct0_pqr345stu901:auth_vwx234yz567
+user4:password000:user4@gmail.com:emailpass000:ct0_abc000def111:auth_ghi222jkl333
+user5:password111:user5@protonmail.com:emailpass111:ct0_mno444pqr555:auth_stu666vwx777
+
+# Add more accounts (up to 100+ for 20M tweets/day)
+# user6:password222:user6@gmail.com:emailpass222:ct0_xxx:auth_yyy
+# user7:password333:user7@yahoo.com:emailpass333:ct0_xxx:auth_yyy
+# ...
+
+# IMPORTANT: Keep this file secure!
+# chmod 600 accounts_only.txt
