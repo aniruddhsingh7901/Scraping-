@@ -251,6 +251,7 @@ class WorkerManager:
         self.reserve_accounts: List[Account] = []
         self.available_proxies: List[str] = []
         self.subreddits: List[str] = []
+        self.pending_subreddits: List[str] = []  # Queue for unassigned subreddits
         self.shutdown_flag = False
         self.forbidden_accounts: List[str] = []  # Track forbidden account usernames
         self.comprehensive_scraper: Optional[Worker] = None  # Dedicated comprehensive scraper
@@ -263,7 +264,8 @@ class WorkerManager:
             "current_cycle": 0,
             "forbidden_accounts_count": 0,
             "account_pool_checks": 0,
-            "comprehensive_scraper_enabled": ENABLE_ALL_SUBS_30DAYS_SCRAPER
+            "comprehensive_scraper_enabled": ENABLE_ALL_SUBS_30DAYS_SCRAPER,
+            "total_subreddits_completed": 0
         }
     
     def load_proxies(self) -> List[str]:
@@ -379,36 +381,43 @@ class WorkerManager:
             logger.error(f"[CONFIG] Error loading subreddits: {e}")
             return []
     
-    def distribute_subreddits(self, subreddits: List[str], num_workers: int) -> List[List[str]]:
-        """Distribute subreddits across workers (1-5 per worker)"""
+    def distribute_subreddits(self, subreddits: List[str], num_workers: int) -> Tuple[List[List[str]], List[str]]:
+        """Distribute subreddits across workers (MAX 5 per worker) with queue for remaining
+        Returns: (distributions, pending_subreddits)
+        """
         if num_workers == 0:
-            return []
+            return [], subreddits
         
         # Shuffle for better distribution
         shuffled = subreddits.copy()
         random.shuffle(shuffled)
         
-        # Calculate subreddits per worker
-        total_subs = len(shuffled)
-        subs_per_worker = max(MIN_SUBREDDITS_PER_WORKER, min(MAX_SUBREDDITS_PER_WORKER, total_subs // num_workers))
-        
         distributions = []
         start_idx = 0
         
+        # Give each worker MAX 5 subreddits
         for i in range(num_workers):
-            # Last worker gets remaining subreddits
-            if i == num_workers - 1:
-                distributions.append(shuffled[start_idx:])
-            else:
-                end_idx = start_idx + subs_per_worker
+            end_idx = min(start_idx + MAX_SUBREDDITS_PER_WORKER, len(shuffled))
+            if start_idx < len(shuffled):
                 distributions.append(shuffled[start_idx:end_idx])
                 start_idx = end_idx
+            else:
+                # No more subreddits to assign
+                distributions.append([])
+        
+        # Remaining subreddits go to pending queue
+        pending = shuffled[start_idx:] if start_idx < len(shuffled) else []
         
         # Log distribution
         for i, dist in enumerate(distributions):
-            logger.info(f"[DISTRIBUTION] Worker {i+1}: {len(dist)} subreddits - {', '.join(dist[:3])}{'...' if len(dist) > 3 else ''}")
+            if dist:
+                logger.info(f"[DISTRIBUTION] Worker {i+1}: {len(dist)} subreddits - {', '.join(dist[:3])}{'...' if len(dist) > 3 else ''}")
+            else:
+                logger.info(f"[DISTRIBUTION] Worker {i+1}: 0 subreddits (will wait for queue)")
         
-        return distributions
+        logger.info(f"[DISTRIBUTION] {len(pending)} subreddits in pending queue for later assignment")
+        
+        return distributions, pending
     
     async def spawn_workers(self):
         """Spawn worker processes based on available accounts"""
@@ -447,20 +456,22 @@ class WorkerManager:
             f"(subreddits: {len(self.subreddits)})"
         )
         
-        # Distribute work
-        distributions = self.distribute_subreddits(self.subreddits, num_workers)
+        # Distribute work and get pending queue
+        distributions, self.pending_subreddits = self.distribute_subreddits(self.subreddits, num_workers)
         
         # Create and start workers
         for i, (account, subs) in enumerate(zip(self.active_accounts, distributions)):
             worker_id = f"worker_{i+1}"
-            worker = Worker(worker_id, account, subs)
-            
-            success = await worker.start()
-            if success:
-                self.workers[worker_id] = worker
-                self.tracking_data["total_workers_spawned"] += 1
-            else:
-                logger.error(f"[ERROR] Failed to start {worker_id}")
+            # Only start workers that have subreddits assigned
+            if subs:
+                worker = Worker(worker_id, account, subs)
+                
+                success = await worker.start()
+                if success:
+                    self.workers[worker_id] = worker
+                    self.tracking_data["total_workers_spawned"] += 1
+                else:
+                    logger.error(f"[ERROR] Failed to start {worker_id}")
         
         logger.info(f"[MANAGER] Spawned {len(self.workers)} workers successfully")
         
@@ -628,11 +639,14 @@ class WorkerManager:
         # Shuffle subreddits
         random.shuffle(self.subreddits)
         
-        # Redistribute
-        distributions = self.distribute_subreddits(self.subreddits, len(self.workers))
+        # Redistribute and get new pending queue
+        distributions, self.pending_subreddits = self.distribute_subreddits(self.subreddits, len(self.workers))
         
         # Update each worker
         for (worker_id, worker), new_subs in zip(self.workers.items(), distributions):
+            if worker.status.status == "completed":
+                continue  # Skip workers that completed all tasks
+                
             old_subs = worker.subreddits
             worker.subreddits = new_subs
             worker.status.subreddits = new_subs
@@ -645,6 +659,8 @@ class WorkerManager:
             
             # Restart worker with new job
             await worker.restart()
+        
+        logger.info(f"[ROTATION] {len(self.pending_subreddits)} subreddits in pending queue")
         
         self.tracking_data["total_job_rotations"] += 1
         self.save_tracking_data()
@@ -667,8 +683,34 @@ class WorkerManager:
         for worker_id, worker in self.workers.items():
             await worker.start()
     
+    async def assign_next_batch(self, worker: Worker):
+        """Assign next batch of subreddits from pending queue to worker"""
+        if not self.pending_subreddits:
+            logger.info(f"[QUEUE] No pending subreddits for {worker.worker_id}, worker completed all tasks")
+            worker.status.status = "completed"
+            return False
+        
+        # Get next batch (max 5)
+        next_batch = self.pending_subreddits[:MAX_SUBREDDITS_PER_WORKER]
+        self.pending_subreddits = self.pending_subreddits[MAX_SUBREDDITS_PER_WORKER:]
+        
+        logger.info(
+            f"[QUEUE] Assigning next batch to {worker.worker_id}: {len(next_batch)} subreddits "
+            f"({', '.join(next_batch[:3])}{'...' if len(next_batch) > 3 else ''}). "
+            f"Remaining in queue: {len(self.pending_subreddits)}"
+        )
+        
+        # Update worker with new batch
+        worker.subreddits = next_batch
+        worker.status.subreddits = next_batch
+        worker.status.assigned_subreddits_count = len(next_batch)
+        
+        # Restart worker with new batch
+        await worker.restart()
+        return True
+    
     async def health_check_loop(self):
-        """Continuously monitor worker health and detect forbidden accounts"""
+        """Continuously monitor worker health, detect forbidden accounts, and manage queue"""
         while not self.shutdown_flag:
             try:
                 # Check regular workers
@@ -676,17 +718,31 @@ class WorkerManager:
                     is_healthy = await worker.is_healthy()
                     
                     if not is_healthy:
-                        # Check if error indicates forbidden account
-                        is_forbidden = self.check_for_forbidden_error(worker.status.last_error)
-                        
-                        if is_forbidden:
-                            logger.error(
-                                f"[HEALTH] {worker_id} has FORBIDDEN error: {worker.status.last_error}"
+                        # Check if worker completed its work (exited with code 0)
+                        if worker.process and worker.process.returncode == 0:
+                            logger.info(
+                                f"[HEALTH] {worker_id} completed its batch successfully! "
+                                f"Assigning next batch from queue..."
                             )
+                            self.tracking_data["total_subreddits_completed"] += worker.status.assigned_subreddits_count
+                            
+                            # Assign next batch from queue
+                            has_more_work = await self.assign_next_batch(worker)
+                            
+                            if not has_more_work:
+                                logger.info(f"[HEALTH] {worker_id} has no more work, entering standby mode")
                         else:
-                            logger.warning(f"[HEALTH] {worker_id} is unhealthy, attempting replacement")
-                        
-                        await self.replace_failed_worker(worker_id, is_forbidden=is_forbidden)
+                            # Worker failed
+                            is_forbidden = self.check_for_forbidden_error(worker.status.last_error)
+                            
+                            if is_forbidden:
+                                logger.error(
+                                    f"[HEALTH] {worker_id} has FORBIDDEN error: {worker.status.last_error}"
+                                )
+                            else:
+                                logger.warning(f"[HEALTH] {worker_id} is unhealthy, attempting replacement")
+                            
+                            await self.replace_failed_worker(worker_id, is_forbidden=is_forbidden)
                 
                 # Check comprehensive scraper
                 if ENABLE_ALL_SUBS_30DAYS_SCRAPER and self.comprehensive_scraper:
@@ -818,6 +874,15 @@ class WorkerManager:
                 "forbidden": {
                     "count": len(self.forbidden_accounts),
                     "accounts": self.forbidden_accounts
+                },
+                "queue_status": {
+                    "pending_subreddits": len(self.pending_subreddits),
+                    "completed_subreddits": self.tracking_data.get("total_subreddits_completed", 0),
+                    "total_subreddits": len(self.subreddits),
+                    "progress_percentage": round(
+                        (self.tracking_data.get("total_subreddits_completed", 0) / len(self.subreddits) * 100) 
+                        if self.subreddits else 0, 2
+                    )
                 },
                 "configuration": {
                     "total_subreddits": len(self.subreddits),

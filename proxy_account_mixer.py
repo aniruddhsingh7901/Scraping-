@@ -154,10 +154,10 @@ class ProxyAccountMixer:
                 else:
                     proxy = self.proxies[i % len(self.proxies)]
                 
-                # Build cookies if tokens provided
+                # Build cookies string if tokens provided
                 cookies = None
                 if account['ct0'] and account['auth_token']:
-                    cookies = f"ct0={account['ct0']};auth_token={account['auth_token']}"
+                    cookies = f"ct0={account['ct0']}; auth_token={account['auth_token']}"
                 
                 # Add account to pool
                 await self.api.pool.add_account(

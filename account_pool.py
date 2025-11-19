@@ -263,14 +263,17 @@ async def build_active_accounts(
     proxies: Optional[List[str]] = None,
     strategy: str = "roundrobin",
     verbose: bool = False,
+    publish_inactive: bool = False,
 ) -> List[Dict[str, str]]:
     """
     Verify each account. If proxies are provided, assign one per account using the given strategy:
       - "roundrobin" (default): proxies[(idx-1) % len(proxies)]
       - "random": random choice per account
     When an account is ACTIVE, publish it with the chosen proxy via the 'proxy_url' field.
+    If publish_inactive is True, publishes INACTIVE accounts instead of active ones.
     """
     active: List[Dict[str, str]] = []
+    inactive: List[Dict[str, str]] = []
     try:
         max_attempts = int(os.getenv("PROXY_MAX_ATTEMPTS", "3"))
     except ValueError:
@@ -298,9 +301,14 @@ async def build_active_accounts(
             if chosen_proxy:
                 acc_copy["proxy_url"] = chosen_proxy
             active.append(acc_copy)
+        else:
+            acc_copy = acc.copy()
+            if chosen_proxy:
+                acc_copy["proxy_url"] = chosen_proxy
+            inactive.append(acc_copy)
         # small jitter between verifications to avoid burst pattern per proxy/IP
         await asyncio.sleep(random.uniform(0.5, 1.5))
-    return active
+    return inactive if publish_inactive else active
 
 
 async def check_and_publish(
@@ -308,10 +316,12 @@ async def check_and_publish(
     out_path: str = "envActive",
     per_account_timeout: int = 20,
     verbose: bool = False,
+    publish_inactive: bool = False,
 ) -> Tuple[int, int]:
     """
-    Parse .env, verify each account, and publish active accounts to out_path.
-    Returns (total_parsed, active_count).
+    Parse .env, verify each account, and publish active or inactive accounts to out_path.
+    If publish_inactive is True, publishes inactive/banned accounts instead of active ones.
+    Returns (total_parsed, published_count).
     """
     accounts = parse_env_accounts(env_path)
     total = len(accounts)
@@ -330,26 +340,28 @@ async def check_and_publish(
         print(f"Loaded proxies from {proxy_file}: {len(proxies)}")
     assignment = os.getenv("PROXY_ASSIGNMENT", "roundrobin")
 
-    active_accounts = await build_active_accounts(
+    published_accounts = await build_active_accounts(
         accounts,
         per_account_timeout=per_account_timeout,
         proxies=proxies if proxies else None,
         strategy=assignment,
         verbose=verbose,
+        publish_inactive=publish_inactive,
     )
-    active_count = len(active_accounts)
+    published_count = len(published_accounts)
 
-    # Compose envActive content
-    banner = f"# envActive last update: {time.strftime('%Y-%m-%d %H:%M:%S')} | active {active_count}/{total}\n"
+    # Compose output content
+    account_type = "inactive" if publish_inactive else "active"
+    banner = f"# {out_path} last update: {time.strftime('%Y-%m-%d %H:%M:%S')} | {account_type} {published_count}/{total}\n"
     body_blocks = []
-    for acc in active_accounts:
+    for acc in published_accounts:
         body_blocks.append(_format_account_block(acc))
         body_blocks.append("")  # blank line between blocks
     content = banner + "\n".join(body_blocks).rstrip() + "\n"
 
     _atomic_write(out_path, content)
-    print(f"Published {active_count} active accounts to {out_path}")
-    return total, active_count
+    print(f"Published {published_count} {account_type} accounts to {out_path}")
+    return total, published_count
 
 
 async def run_loop():
@@ -366,9 +378,11 @@ async def run_loop():
 
     print(f"Account pool started. Source={env_path} Target={out_path} Interval={interval}s ({interval/60:.1f} min)")
 
+    publish_inactive = os.getenv("PUBLISH_INACTIVE", "false").lower() == "true"
+
     # Initial run
     try:
-        await check_and_publish(env_path=env_path, out_path=out_path)
+        await check_and_publish(env_path=env_path, out_path=out_path, publish_inactive=publish_inactive)
     except Exception as e:
         print(f"Initial publish error: {e}")
 
@@ -379,7 +393,7 @@ async def run_loop():
             print(f"\n{'='*60}")
             print(f"Starting periodic verification at {time.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*60}")
-            await check_and_publish(env_path=env_path, out_path=out_path)
+            await check_and_publish(env_path=env_path, out_path=out_path, publish_inactive=publish_inactive)
         except Exception as e:
             print(f"Periodic publish error: {e}")
 
@@ -467,6 +481,11 @@ def main():
         default=3600,
         help="Verification interval in seconds for daemon mode (default: 3600 = 1 hour)"
     )
+    parser.add_argument(
+        "--publish-inactive",
+        action="store_true",
+        help="Publish INACTIVE (banned/failed) accounts instead of active ones"
+    )
     
     args = parser.parse_args()
     
@@ -474,11 +493,13 @@ def main():
     os.environ["POOL_SOURCE"] = args.env
     os.environ["POOL_TARGET"] = args.output
     os.environ["ACCOUNT_POLL_INTERVAL"] = str(args.interval)
+    os.environ["PUBLISH_INACTIVE"] = "true" if args.publish_inactive else "false"
     
     if args.mode == "daemon":
         print(f"Starting in DAEMON mode")
         print(f"  Source: {args.env}")
         print(f"  Output: {args.output}")
+        print(f"  Publish: {'INACTIVE (banned)' if args.publish_inactive else 'ACTIVE'} accounts")
         print(f"  Interval: {args.interval}s ({args.interval/60:.1f} minutes)")
         print(f"  Press Ctrl+C to stop")
         print()
