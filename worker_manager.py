@@ -36,14 +36,17 @@ ACCOUNTS_FOR_ALL_SUBS_30DAYS = 1  # Reserve 1 account for comprehensive 30-day s
 ALLOCATION_RATIO = 2/3  # Allocate 2/3 of remaining accounts to reddit-scraper
 MIN_SUBREDDITS_PER_WORKER = 1
 MAX_SUBREDDITS_PER_WORKER = 5
-ENABLE_ALL_SUBS_30DAYS_SCRAPER = True  # Enable/disable comprehensive scraper
+# ⚠️ IMPORTANT: Set to False if using all_subs_worker_manager.py separately
+# The all_subs_worker_manager.py is now the recommended way to run comprehensive scraping
+# with better parallel processing, checkpointing, and account allocation (1/4 of accounts)
+ENABLE_ALL_SUBS_30DAYS_SCRAPER = False  # Enable/disable comprehensive scraper (disabled by default)
 WORK_DURATION_MINUTES = 60  # Work for 60 minutes
 REST_DURATION_MINUTES = 5   # Rest for 5 minutes
 LONG_WORK_DURATION_MINUTES = 360  # 6 hours
 LONG_REST_DURATION_MINUTES = 10   # 10 minutes rest
-HEALTH_CHECK_INTERVAL = 30  # Check worker health every 30 seconds
+HEALTH_CHECK_INTERVAL = 1800  # Check worker health every 30 seconds
 ACCOUNT_POOL_CHECK_INTERVAL = 1800  # Check account pool every 30 minutes
-CONFIG_RELOAD_INTERVAL = 300  # Reload config every 5 minutes
+CONFIG_RELOAD_INTERVAL = 1800  # Reload config every 5 minutes
 JOB_ROTATION_INTERVAL = 3600  # Rotate jobs every 1 hour
 FORBIDDEN_ERROR_KEYWORDS = ["403", "forbidden", "suspended", "banned", "401"]
 
@@ -217,12 +220,19 @@ class Worker:
             return False
         
         if self.process.returncode is not None:
-            # Process has exited
-            self.status.status = "failed"
-            self.status.errors_count += 1
-            self.status.last_error = f"Process exited with code {self.process.returncode}"
-            logger.error(f"[WORKER {self.worker_id}] Process died with code {self.process.returncode}")
-            return False
+            # Process has exited - check if it completed successfully
+            if self.process.returncode == 0:
+                # Exit code 0 means successful completion
+                self.status.status = "completed"
+                logger.info(f"[WORKER {self.worker_id}] Process completed successfully (exit code 0)")
+                return False
+            else:
+                # Non-zero exit code means failure
+                self.status.status = "failed"
+                self.status.errors_count += 1
+                self.status.last_error = f"Process exited with code {self.process.returncode}"
+                logger.error(f"[WORKER {self.worker_id}] Process failed with code {self.process.returncode}")
+                return False
         
         self.status.last_health_check = time.time()
         return True

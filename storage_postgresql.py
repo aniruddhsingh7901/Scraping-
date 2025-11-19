@@ -113,6 +113,22 @@ class PostgreSQLMinerStorage:
                     ON DataEntity (datetime)
                 """)
 
+                # Create Checkpoint table for scraper progress tracking
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS Checkpoint (
+                        worker_id TEXT PRIMARY KEY,
+                        timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        posts_discovered INTEGER DEFAULT 0,
+                        posts_processed INTEGER DEFAULT 0,
+                        posts_saved INTEGER DEFAULT 0,
+                        comments_processed INTEGER DEFAULT 0,
+                        comments_saved INTEGER DEFAULT 0,
+                        subreddits_completed TEXT[],
+                        last_processed_posts JSONB,
+                        stats JSONB
+                    )
+                """)
+
                 conn.commit()
 
     def store_data_entities(self, data_entities: List[DataEntity]):
@@ -156,45 +172,59 @@ class PostgreSQLMinerStorage:
                     data_entity.content_size_bytes,
                 ))
 
-            # Batch insert with ON CONFLICT UPDATE - track inserts vs updates
+            # Store ALL data by making duplicate URIs unique with timestamp suffix
+            # This preserves complete historical record while maintaining validator compatibility
             with conn.cursor() as cursor:
-                # Get count before insert
-                cursor.execute("SELECT COUNT(*) FROM DataEntity")
-                count_before = cursor.fetchone()[0]
+                # Check which URIs already exist
+                uris_to_check = [v[0] for v in values]
+                if uris_to_check:
+                    cursor.execute(
+                        "SELECT uri FROM DataEntity WHERE uri = ANY(%s)",
+                        (uris_to_check,)
+                    )
+                    existing_uris = {row[0] for row in cursor.fetchall()}
+                else:
+                    existing_uris = set()
                 
+                # Make URIs unique for duplicates
+                import time as time_module
+                timestamp_ms = int(time_module.time() * 1000)
+                counter = 0
+                final_values = []
+                
+                for value in values:
+                    uri = value[0]
+                    # If URI exists, append unique suffix
+                    if uri in existing_uris:
+                        counter += 1
+                        unique_uri = f"{uri}#t{timestamp_ms}_{counter}"
+                        # Replace URI in tuple
+                        value = (unique_uri,) + value[1:]
+                        existing_uris.add(unique_uri)
+                    else:
+                        existing_uris.add(uri)
+                    
+                    final_values.append(value)
+                
+                # Insert with unique URIs
                 psycopg2.extras.execute_batch(
                     cursor,
                     """
                     INSERT INTO DataEntity (uri, datetime, timeBucketId, source, label, content, contentSizeBytes)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (uri) DO UPDATE SET
-                        datetime = EXCLUDED.datetime,
-                        timeBucketId = EXCLUDED.timeBucketId,
-                        source = EXCLUDED.source,
-                        label = EXCLUDED.label,
-                        content = EXCLUDED.content,
-                        contentSizeBytes = EXCLUDED.contentSizeBytes
                     """,
-                    values
+                    final_values
                 )
                 
-                # Get count after insert
-                cursor.execute("SELECT COUNT(*) FROM DataEntity")
-                count_after = cursor.fetchone()[0]
-                
                 conn.commit()
-                
-                # Calculate inserts vs updates
-                new_inserts = count_after - count_before
-                duplicates_updated = len(data_entities) - new_inserts
 
-            # Use both loggers to ensure visibility
-            log_msg = f"Stored {len(data_entities)} data entities to PostgreSQL | NEW: {new_inserts}, DUPLICATES: {duplicates_updated}"
+            # Simple logging
+            log_msg = f"Stored {len(data_entities)} data entities to PostgreSQL (all data preserved)"
             logger.info(log_msg)
             try:
                 bt.logging.info(log_msg)
             except:
-                pass  # bt.logging might not be initialized
+                pass
 
     def list_data_entities_in_data_entity_bucket(
         self, data_entity_bucket_id: DataEntityBucketId

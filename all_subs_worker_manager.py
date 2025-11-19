@@ -160,9 +160,9 @@ class Worker:
                 "POSTGRES_PORT": postgres_config.get("POSTGRES_PORT", "5432")
             })
             
-            # Start the scraper process (use reddit_scraper_dataentity.py)
+            # Start the scraper process (use reddit_all_subs_30days_dataentity.py for all-subs scraping)
             self.process = await asyncio.create_subprocess_exec(
-                sys.executable, "reddit_scraper_dataentity.py",
+                sys.executable, "reddit_all_subs_30days_dataentity.py",
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
