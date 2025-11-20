@@ -18,6 +18,7 @@ sys.path.append('/root/Algo-test-script/data-universe')
 
 import bittensor as bt
 from twscrape import API
+from twscrape.login import login, LoginConfig
 from common.data import TimeBucket
 from scraping.x.model import XContent
 
@@ -69,8 +70,50 @@ class TwitterScraper:
         except:
             return None
     
-    async def scrape_hashtag(self, hashtag, limit=100):
-        """Scrape one hashtag."""
+    async def relogin_all_accounts(self):
+        """Re-login all accounts to refresh CSRF tokens and cookies."""
+        try:
+            # Get all accounts from the pool
+            accounts = await self.api.pool.get_all()
+            bt.logging.info(f"Re-logging in {len(accounts)} accounts to fix CSRF errors...")
+            
+            success_count = 0
+            failed_count = 0
+            
+            for account in accounts:
+                try:
+                    bt.logging.info(f"Re-logging in: {account.username}")
+                    
+                    # Reset account to inactive state first
+                    account.active = False
+                    account.error_msg = None
+                    await self.api.pool.save(account)
+                    
+                    # Perform fresh login
+                    login_config = LoginConfig(email_first=False, manual=False)
+                    await login(account, cfg=login_config)
+                    
+                    # Save the refreshed account
+                    await self.api.pool.save(account)
+                    
+                    bt.logging.success(f"Successfully re-logged in: {account.username}")
+                    success_count += 1
+                    await asyncio.sleep(2)  # Delay between logins
+                    
+                except Exception as e:
+                    failed_count += 1
+                    bt.logging.error(f"Failed to re-login {account.username}: {str(e)}")
+                    continue
+            
+            bt.logging.success(f"Re-login complete: {success_count} successful, {failed_count} failed")
+            return success_count > 0
+            
+        except Exception as e:
+            bt.logging.error(f"Error during account re-login: {str(e)}")
+            return False
+    
+    async def scrape_hashtag(self, hashtag, limit=100, retry_count=0):
+        """Scrape one hashtag with automatic retry on CSRF errors."""
         clean_tag = hashtag.lstrip('#')
         start_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d')
         query = f"{clean_tag} since:{start_date}"
@@ -91,8 +134,28 @@ class TwitterScraper:
             
             bt.logging.success(f"Scraped {len(entities)} tweets for {hashtag}")
             return entities
+            
         except Exception as e:
-            bt.logging.error(f"Error: {e}")
+            error_msg = str(e)
+            # Check for CSRF/auth errors (403 status, error 353, csrf mentions)
+            if ("353" in error_msg or "403" in error_msg or 
+                "csrf" in error_msg.lower() or "matching csrf cookie" in error_msg.lower()):
+                
+                if retry_count < 2:
+                    bt.logging.warning(f"CSRF/Auth error detected. Attempting to re-login accounts... (attempt {retry_count + 1}/2)")
+                    relogin_success = await self.relogin_all_accounts()
+                    
+                    if relogin_success:
+                        await asyncio.sleep(3)  # Wait before retry
+                        bt.logging.info(f"Retrying scrape for {hashtag}")
+                        return await self.scrape_hashtag(hashtag, limit, retry_count + 1)
+                    else:
+                        bt.logging.error(f"Re-login failed, cannot retry")
+                else:
+                    bt.logging.error(f"Failed after {retry_count} re-login attempts")
+            else:
+                bt.logging.error(f"Error: {error_msg}")
+            
             return []
     
     def store_entities(self, entities):
@@ -153,6 +216,18 @@ class TwitterScraper:
     async def run(self):
         """Main loop."""
         bt.logging.info("Starting scraper...")
+        
+        # Check account health at startup
+        try:
+            accounts = await self.api.pool.get_all()
+            active_accounts = [acc for acc in accounts if acc.active]
+            bt.logging.info(f"Found {len(accounts)} accounts ({len(active_accounts)} active)")
+            
+            if len(active_accounts) == 0:
+                bt.logging.warning("No active accounts found. Running re-login...")
+                await self.relogin_all_accounts()
+        except Exception as e:
+            bt.logging.warning(f"Could not check account health: {str(e)}")
         
         if not self.load_hashtags():
             return
