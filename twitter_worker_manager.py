@@ -7,8 +7,7 @@ Simple Twitter Scraper
 """
 
 import asyncio
-import psycopg2
-from psycopg2.extras import execute_batch
+import asyncpg
 from datetime import datetime, timezone, timedelta
 from contextlib import aclosing
 import sys
@@ -24,9 +23,9 @@ from scraping.x.model import XContent
 
 
 class TwitterScraper:
-    """Simple sequential scraper."""
+    """Asynchronous parallel scraper."""
     
-    def __init__(self):
+    def __init__(self, max_concurrent=5):
         self.api = API(pool="twitter_accounts.db")  # twscrape handles account rotation
         self.postgres_config = {
             'host': 'localhost',
@@ -37,6 +36,8 @@ class TwitterScraper:
         }
         self.hashtags = []
         self.stats = {'scraped': 0, 'stored': 0}
+        self.semaphore = asyncio.Semaphore(max_concurrent)  # Control concurrency
+        self.stats_lock = asyncio.Lock()  # Thread-safe stats updates
     
     def load_hashtags(self):
         """Load hashtags from file."""
@@ -158,14 +159,36 @@ class TwitterScraper:
             
             return []
     
-    def store_entities(self, entities):
-        """Store in PostgreSQL."""
+    async def scrape_and_store(self, hashtag, index, total):
+        """Scrape and store a single hashtag with concurrency control."""
+        async with self.semaphore:
+            try:
+                bt.logging.info(f"[{index}/{total}] Starting: {hashtag}")
+                
+                entities = await self.scrape_hashtag(hashtag, limit=1000)
+                stored = await self.store_entities(entities)
+                
+                async with self.stats_lock:
+                    self.stats['scraped'] += len(entities)
+                    self.stats['stored'] += stored
+                
+                bt.logging.success(f"[{index}/{total}] {hashtag}: Stored {stored} tweets")
+                
+                await asyncio.sleep(1)
+                return stored
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                bt.logging.error(f"[{index}/{total}] Error processing {hashtag}: {e}")
+                return 0
+    
+    async def store_entities(self, entities):
+        """Store in PostgreSQL asynchronously."""
         if not entities:
             return 0
         
         try:
-            conn = psycopg2.connect(**self.postgres_config)
-            cur = conn.cursor()
+            conn = await asyncpg.connect(**self.postgres_config)
             
             thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
             batch_data = []
@@ -192,30 +215,28 @@ class TwitterScraper:
                     continue
             
             if batch_data:
-                execute_batch(cur, """
+                await conn.executemany("""
                     INSERT INTO dataentity 
                     (uri, datetime, timebucketid, source, label, content, contentsizebytes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     ON CONFLICT (uri) DO UPDATE SET
                         datetime = EXCLUDED.datetime,
                         content = EXCLUDED.content
-                """, batch_data, page_size=1000)
+                """, batch_data)
                 
-                conn.commit()
                 stored = len(batch_data)
             else:
                 stored = 0
             
-            cur.close()
-            conn.close()
+            await conn.close()
             return stored
         except Exception as e:
             bt.logging.error(f"Storage error: {e}")
             return 0
     
-    async def run(self):
-        """Main loop."""
-        bt.logging.info("Starting scraper...")
+    async def run(self, batch_size=10):
+        """Main loop with parallel processing."""
+        bt.logging.info("Starting async scraper...")
         
         # Check account health at startup
         try:
@@ -232,29 +253,32 @@ class TwitterScraper:
         if not self.load_hashtags():
             return
         
-        for i, hashtag in enumerate(self.hashtags, 1):
-            try:
-                bt.logging.info(f"[{i}/{len(self.hashtags)}] {hashtag}")
-                
-                entities = await self.scrape_hashtag(hashtag, limit=1000)
-                stored = self.store_entities(entities)
-                
-                self.stats['scraped'] += len(entities)
-                self.stats['stored'] += stored
-                
-                bt.logging.info(f"Stored: {stored}")
-                
-                if i % 10 == 0:
-                    bt.logging.info(f"\nTotal: {self.stats['stored']:,} tweets stored\n")
-                
-                await asyncio.sleep(1)
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                bt.logging.error(f"Error: {e}")
-                continue
+        total_hashtags = len(self.hashtags)
+        bt.logging.info(f"Processing {total_hashtags} hashtags in batches of {batch_size} (max {self.semaphore._value} concurrent)")
         
-        bt.logging.success(f"Done! Stored {self.stats['stored']:,} tweets")
+        try:
+            # Process hashtags in batches for better control
+            for batch_start in range(0, total_hashtags, batch_size):
+                batch_end = min(batch_start + batch_size, total_hashtags)
+                batch = self.hashtags[batch_start:batch_end]
+                
+                bt.logging.info(f"\n=== Processing batch {batch_start//batch_size + 1}/{(total_hashtags + batch_size - 1)//batch_size} ===")
+                
+                # Create tasks for this batch
+                tasks = [
+                    self.scrape_and_store(hashtag, batch_start + i + 1, total_hashtags)
+                    for i, hashtag in enumerate(batch)
+                ]
+                
+                # Run batch concurrently
+                await asyncio.gather(*tasks, return_exceptions=True)
+                
+                bt.logging.info(f"Batch complete. Total stored so far: {self.stats['stored']:,} tweets\n")
+        
+        except KeyboardInterrupt:
+            bt.logging.warning("Interrupted by user")
+        
+        bt.logging.success(f"\nDone! Stored {self.stats['stored']:,} tweets from {self.stats['scraped']:,} scraped")
 
 
 async def main():
@@ -265,3 +289,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
