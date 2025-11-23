@@ -1,0 +1,45 @@
+# YouTube Data API keys (one per line)
+# Copy this file to: OnDEMANDYT/youtube_api_keys.txt
+# Then put your API keys below, one per line. Lines starting with # are ignored.
+#
+# Example:
+# AIzaSyA...KEY1
+# AIzaSyB...KEY2
+# AIzaSyC...KEY3
+#
+# The yt_gravity_orchestrator rotates keys round-robin per job.
+# If you prefer a single key via env, you can instead set:
+#   export YOUTUBE_API_KEY=YOUR_KEY
+# and the file will be ignored.
+
+# Quick start with PM2 (run from /root/Algo-test-script):
+#
+# 1) Save your keys:
+#    cp OnDEMANDYT/youtube_api_keys.txt.example OnDEMANDYT/youtube_api_keys.txt
+#    # Edit youtube_api_keys.txt and add your keys (one per line)
+#
+# 2) Start the YouTube orchestrator:
+#    export YT_KEYS_FILE=/root/Algo-test-script/OnDEMANDYT/youtube_api_keys.txt
+#    export GRAVITY_YT_JSON=/root/Algo-test-script/gravity/yt.json
+#    export LOOP_INTERVAL_SEC=120 MAX_CONCURRENCY=3 MAX_VIDEOS_PER_JOB=50 DAYS_BACK_DEFAULT=7
+#    export WRITE_JOB_FILES=0 WRITE_ONDEMAND_FILES=0
+#    export ONDEMAND_FILE=/root/Algo-test-script/OnDEMANDYT/ondemand_requests.json
+#    pm2 start OnDEMANDYT/yt_gravity_orchestrator.py --interpreter python3 --name yt-orchestrator --time
+#
+# 3) Logs:
+#    pm2 logs yt-orchestrator --lines 200
+#
+# 4) Increase per-job limit (optional, e.g., 1000 videos/job):
+#    MAX_VIDEOS_PER_JOB=1000 pm2 restart yt-orchestrator --update-env
+#
+# 5) PostgreSQL env (only if needed):
+#    PG_HOST=127.0.0.1 PG_DATABASE=reddit_miner_db PG_USER=<user> PG_PASSWORD=<password> pm2 restart yt-orchestrator --update-env
+#
+# 6) On-demand file format (optional):
+#    Create OnDEMANDYT/ondemand_requests.json with:
+#    {
+#      "requests": [
+#        { "labels": ["#ytc_c_fireship", "#ytc_c_ted"], "start_datetime": "2025-11-15T00:00:00Z", "end_datetime": "2025-11-22T00:00:00Z", "limit": 20 }
+#      ]
+#    }
+#    The orchestrator will process it next loop and store results to PostgreSQL (disk artifacts disabled by default).

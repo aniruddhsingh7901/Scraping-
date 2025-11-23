@@ -1,0 +1,63 @@
+# twscrape accounts file (ct0/auth format example)
+# You requested fields: username:password:email:password:ct0:auth:proxy
+# This example uses exactly that order, one account per line, colon-separated.
+#
+# Field mapping:
+# - username         X handle (without @)
+# - password         X account password
+# - email            Email used for the X account
+# - email_password   Email inbox password (used by login/challenges)
+# - ct0              Value of the ct0 cookie
+# - auth             Value of the auth_token cookie
+# - proxy            Optional. http(s) proxy for this account, leave empty to skip. Examples:
+#                      http://host:port
+#                      http://user:pass@host:port
+#
+# How to import into a separate twscrape DB (accounts_x2.db):
+# 1) Convert ct0/auth into the cookies field twscrape expects:
+#    This will create OnDEMANDX/twscrape_accounts.txt in the canonical format
+#    "username:password:email:email_password:cookies:proxy" where
+#    cookies = "auth_token=...; ct0=...".
+#
+#    Run in shell:
+#      python3 - <<'PY'
+#      import os
+#      inp = 'OnDEMANDX/twscrape_accounts_ct0_auth.txt'
+#      out = 'OnDEMANDX/twscrape_accounts.txt'
+#      os.makedirs('OnDEMANDX', exist_ok=True)
+#      with open(inp, encoding='utf-8') as f, open(out, 'w', encoding='utf-8') as g:
+#          for line in f:
+#              line=line.strip()
+#              if not line or line.startswith('#'): 
+#                  continue
+#              parts = line.split(':')
+#              if len(parts) < 7:
+#                  raise SystemExit(f'Invalid line (need 7 fields): {line}')
+#              username,password,email,email_password,ct0,auth,proxy = parts[:7]
+#              cookies = f'auth_token={auth}; ct0={ct0}'
+#              g.write(f'{username}:{password}:{email}:{email_password}:{cookies}:{proxy}\\n')
+#      print('Wrote OnDEMANDX/twscrape_accounts.txt')
+#      PY
+#
+# 2) Import into the dedicated DB and login:
+#      twscrape --db /root/Algo-test-script/accounts_x2.db add_accounts \
+#        /root/Algo-test-script/OnDEMANDX/twscrape_accounts.txt \
+#        "username:password:email:email_password:cookies:proxy"
+#      twscrape --db /root/Algo-test-script/accounts_x2.db login_accounts
+#
+# 3) Point the X orchestrator to this DB:
+#      export TWSCRAPE_DB=/root/Algo-test-script/accounts_x2.db
+#      pm2 restart x-orchestrator --update-env
+#
+# Optional: If you have MFA/TOTP, you can add an 8th column at the end (mfa_code).
+# You would also need to adjust the conversion snippet to include it in cookies or
+# pass it programmatically; the twscrape CLI import does not accept separate mfa_code,
+# but programmatic import can (AccountsPool.add_account has mfa_code).
+#
+# =========================
+# EXAMPLE ACCOUNTS (EDIT THESE, THEN SAVE AS twscrape_accounts_ct0_auth.txt)
+# =========================
+alice:AlicePassword123!:alice@example.com:EmailPasswordHere:BBBBBBBB:AAAAAAAA:http://user:pass@31.204.29.10:5432
+bob:BobStrongPass!@#:bob@example.org:EmailPassXYZ:DDDDDDDD:CCCCCCCC:http://31.204.29.29:5432
+# No proxy example (keep the trailing colon):
+charlie:Ch@rlieP@ssw0rd:charlie@example.net:MailPass123:FFFFFFFF:EEEEEEEE:

@@ -14,13 +14,26 @@ import bittensor as bt
 async def setup_accounts_from_file(filepath: str, db_path: str = "twitter_accounts.db"):
     """
     Load accounts from a file and add them to twscrape pool.
-    
-    File format (one account per line):
-    username:password:email:email_password:proxy:cookies
-    
-    OR for cookie-only accounts (more stable):
-    username:password:email:email_password::cookies
-    
+
+    Supported file formats (one account per line):
+
+    A) Legacy with optional proxy and cookie string:
+       username:password:email:email_password:proxy:cookies
+       - proxy can be empty to skip
+       - cookies is a single string like "ct0=...; auth_token=..."
+
+    B) Cookie-only (recommended legacy):
+       username:password:email:email_password::cookies
+
+    C) accounts_only.txt extended format (fixed per-account proxy + tokens):
+       username:password:email:email_password:ct0:auth_token:proxy_host:proxy_port:proxy_user:proxy_pass
+
+       Notes:
+       - We will construct cookies as "ct0=<ct0>; auth_token=<auth_token>"
+       - We will construct proxy URL as:
+           http://proxy_user:proxy_pass@proxy_host:proxy_port
+         (If proxy_user/proxy_pass are empty, we use http://proxy_host:proxy_port)
+
     Args:
         filepath: Path to accounts file
         db_path: Path to SQLite database for account storage
@@ -44,16 +57,38 @@ async def setup_accounts_from_file(filepath: str, db_path: str = "twitter_accoun
                 if len(parts) < 4:
                     bt.logging.error(f"Line {i}: Invalid format (need at least username:password:email:email_password)")
                     continue
-                
+
                 username = parts[0].strip()
                 password = parts[1].strip()
                 email = parts[2].strip()
                 email_password = parts[3].strip()
-                proxy = parts[4].strip() if len(parts) > 4 and parts[4].strip() else None
-                cookies = parts[5].strip() if len(parts) > 5 and parts[5].strip() else None
-                
-                bt.logging.info(f"Adding account {i}/{len(lines)}: {username}")
-                
+
+                proxy = None
+                cookies = None
+
+                # Extended accounts_only.txt format:
+                # username:password:email:email_password:ct0:auth_token:proxy_host:proxy_port:proxy_user:proxy_pass
+                if len(parts) >= 10 and parts[4].strip() and parts[5].strip():
+                    ct0 = parts[4].strip()
+                    auth_token = parts[5].strip()
+                    host = parts[6].strip()
+                    port = parts[7].strip()
+                    puser = parts[8].strip()
+                    ppass = parts[9].strip()
+
+                    if host and port and puser and ppass:
+                        proxy = f"http://{puser}:{ppass}@{host}:{port}"
+                    elif host and port:
+                        proxy = f"http://{host}:{port}"
+
+                    cookies = f"ct0={ct0}; auth_token={auth_token}"
+                else:
+                    # Legacy format: username:password:email:email_password:proxy:cookies
+                    proxy = parts[4].strip() if len(parts) > 4 and parts[4].strip() else None
+                    cookies = parts[5].strip() if len(parts) > 5 and parts[5].strip() else None
+
+                bt.logging.info(f"Adding account {i}/{len(lines)}: {username} (proxy={'set' if proxy else 'none'}, cookies={'set' if cookies else 'none'})")
+
                 await api.pool.add_account(
                     username=username,
                     password=password,
